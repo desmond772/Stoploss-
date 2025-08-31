@@ -17,42 +17,57 @@ reconnect_attempts = 0
 
 
 async def receive_messages(websocket):
+    profile_requested = False
     try:
         async for message in websocket:
-            # Ensure message is always string
+            # Ensure message is always a string
             if isinstance(message, bytes):
                 message = message.decode("utf-8", errors="ignore")
 
+            # Handle handshake and keep-alive messages
             if message.startswith("0"):
                 print("Received handshake response. Sending authentication...")
-                auth_payload = (
-                    f'42["auth",{{"session":"{POCKET_OPTION_SSID}","isDemo":0}}]'
-                )
+                auth_payload = f'42["auth",{{"session":"{POCKET_OPTION_SSID}","isDemo":0}}]'
                 await websocket.send(auth_payload)
+                continue
+            elif message == "2":
+                # print("Received ping, sending pong")
+                await websocket.send("3")
+                continue
 
-            elif message.startswith("40"):
-                print("Received authentication response. Sending profile request...")
-                balance_payload = '42["profile"]'
-                await websocket.send(balance_payload)
+            # Skip large asset updates or other non-JSON messages
+            if not message.startswith("42"):
+                # You can add a more specific handler here if needed
+                # print(f"Skipping non-JSON message or special packet: {message}")
+                continue
 
-            elif message.startswith('42["profile"'):
-                try:
-                    profile_info = json.loads(message[3:])[1]
+            # Strip Socket.IO prefix and attempt to parse JSON
+            try:
+                # Remove the '42' prefix and parse the payload
+                json_payload = json.loads(message[2:])
+                
+                # Check for the specific 'profile' event
+                if isinstance(json_payload, list) and len(json_payload) > 0 and json_payload[0] == "profile":
+                    profile_info = json_payload[1]
                     balance = profile_info.get("balance")
                     demo_balance = profile_info.get("demoBalance")
                     currency = profile_info.get("currency")
                     print(f"Balance: {balance}")
                     print(f"Demo Balance: {demo_balance}")
                     print(f"Currency: {currency}")
-                except Exception as e:
-                    print(f"Error parsing profile: {e}")
+                    
+                # Handle other message types for debugging if needed
+                else:
+                    event_name = json_payload[0] if isinstance(json_payload, list) and len(json_payload) > 0 else "unknown"
+                    if event_name == "updateAssets":
+                        print("Received updateAssets. Skipping large data.")
+                    else:
+                        print(f"Received event: '{event_name}' with data: {json_payload}")
 
-            elif message == "2":
-                print("Received ping, sending pong")
-                await websocket.send("3")
-
-            else:
-                print(f"Received message: {message}")
+            except json.JSONDecodeError as e:
+                print(f"Error parsing JSON: {e} - Message: {message}")
+            except Exception as e:
+                print(f"Error processing message: {e}")
 
     except websockets.exceptions.ConnectionClosed:
         print("Connection closed. Reconnecting...")
@@ -63,11 +78,10 @@ async def keep_alive(websocket):
     while True:
         try:
             await websocket.send("2")
-            print("Ping sent successfully.")
             await asyncio.sleep(10)
         except websockets.exceptions.ConnectionClosed:
-            print("Connection closed. Reconnecting...")
-            await reconnect()
+            print("Connection closed during ping. Reconnecting...")
+            break
         except Exception as e:
             print(f"Error sending ping: {e}")
 
@@ -101,10 +115,20 @@ async def main():
             ping_interval=None,
         ) as websocket:
             print("WebSocket connection established successfully.")
+            
+            # Use a task to send the profile request after a short delay
+            async def send_profile_request_after_delay():
+                await asyncio.sleep(3)  # Wait for initial asset data to pass
+                print("Sending profile request after delay...")
+                balance_payload = '42["profile"]'
+                await websocket.send(balance_payload)
+            
             tasks = [
                 asyncio.create_task(receive_messages(websocket)),
                 asyncio.create_task(keep_alive(websocket)),
+                asyncio.create_task(send_profile_request_after_delay())
             ]
+            
             await asyncio.gather(*tasks)
     except Exception as e:
         print(f"An error occurred: {e}")
@@ -117,3 +141,5 @@ if __name__ == "__main__":
         print("\nScript interrupted by user. Exiting...")
     except Exception as e:
         print(f"An error occurred: {e}")
+
+                                      
